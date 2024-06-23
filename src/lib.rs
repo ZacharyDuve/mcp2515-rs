@@ -111,18 +111,20 @@ impl Default for Settings {
 }
 
 /// MCP2515 driver.
-pub struct MCP2515<SPI, CS> {
+pub struct MCP2515<CS> {
+    //Note: Removing ownership of the spi to a ref in the function call to ensure that the bus can be shared by other devices
     /// SPI interface to interact with the MCP2515.
-    spi: SPI,
+    // spi: SPI,
+
     /// Chip select pin to select the MCP2515.
     cs: CS,
 }
 
-impl<SPI, CS, SPIE, CSE> MCP2515<SPI, CS>
+impl<SPIE, SPI, CS, CSE> MCP2515<CS>
 where
+    SPIE: Debug,
     SPI: Transfer<u8, Error = SPIE>,
     CS: OutputPin<Error = CSE>,
-    SPIE: Debug,
     CSE: Debug,
 {
     /// Creates a new MCP2515 driver, initialising the chip in the process.
@@ -143,8 +145,8 @@ where
     ///
     /// * `spi` - SPI interface.
     /// * `cs` - Chip-select pin for the MCP2515.
-    pub fn new(spi: SPI, cs: CS) -> Self {
-        Self { spi, cs }
+    pub fn new(cs: CS) -> Self {
+        Self {cs}
     }
 
     /// Initializes the MCP2515 driver. This should be called once at the start
@@ -156,29 +158,31 @@ where
     /// * `settings` - Settings for MCP2515. See [`Settings`].
     pub fn init(
         &mut self,
+        spi: &mut SPI,
         delay: &mut impl DelayMs<u8>,
         settings: Settings,
     ) -> Result<(), SPIE, CSE> {
         self.cs.set_high().map_err(Error::Hal)?;
-        self.reset(delay)?;
+        self.reset(spi, delay)?;
 
         // Set bitrate, enable clken if required, and change into configuration mode.
-        self.set_mode(OpMode::Configuration)?;
-        self.set_bitrate(settings.can_speed, settings.mcp_speed, settings.clkout_en)?;
-        self.set_clken(settings.clkout_en)?;
+        self.set_mode(spi, OpMode::Configuration)?;
+        self.set_bitrate(spi, settings.can_speed, settings.mcp_speed, settings.clkout_en)?;
+        self.set_clken(spi, settings.clkout_en)?;
 
         // Clear Tx registers (TXB{O,1,2}CTRL += 14)
         let zeros = [0u8; 14];
-        self.write_registers(Register::TXB0CTRL, &zeros)?;
-        self.write_registers(Register::TXB1CTRL, &zeros)?;
-        self.write_registers(Register::TXB2CTRL, &zeros)?;
+        self.write_registers(spi, Register::TXB0CTRL, &zeros)?;
+        self.write_registers(spi, Register::TXB1CTRL, &zeros)?;
+        self.write_registers(spi, Register::TXB2CTRL, &zeros)?;
 
         // Clear Rx registers
-        self.write_register_addr(&[Register::RXB0CTRL], &[0])?;
-        self.write_register_addr(&[Register::RXB1CTRL], &[0])?;
+        self.write_register_addr(spi, &[Register::RXB0CTRL], &[0])?;
+        self.write_register_addr(spi, &[Register::RXB1CTRL], &[0])?;
 
         // Enable interrupts for Rx buffer full, error and message errors.
         self.write_register(
+            spi,
             CanInte::new()
                 .with_rx0ie(true)
                 .with_rx1ie(true)
@@ -189,6 +193,7 @@ where
         // Receive all messages that have a standard or extended identifier. Set RXF0 up
         // for RXB0 and RXF1 up for RXB1.
         self.modify_register(
+            spi,
             Rxb0Ctrl::new()
                 .with_rxm(RecvBufOpMode::FilterOn)
                 .with_bukt(true)
@@ -196,6 +201,7 @@ where
             Rxb0Ctrl::MASK_RXM | Rxb0Ctrl::MASK_BUKT | Rxb0Ctrl::MASK_FILTHIT0,
         )?;
         self.modify_register(
+            spi,
             Rxb1Ctrl::new()
                 .with_rxm(RecvBufOpMode::FilterOn)
                 .with_filthit(FilterHit::Filter1),
@@ -210,16 +216,16 @@ where
             } else {
                 Id::Standard(StandardId::ZERO)
             };
-            self.set_filter(filt, id)?;
+            self.set_filter(spi, filt, id)?;
         }
 
         // Clear all Rx masks and allow extended IDs.
         for mask in RxMask::ALL {
-            self.set_mask(mask, Id::Extended(ExtendedId::ZERO))?;
+            self.set_mask(spi, mask, Id::Extended(ExtendedId::ZERO))?;
         }
 
         // Finally switch to requested mode.
-        self.set_mode(settings.mode)?;
+        self.set_mode(spi, settings.mode)?;
 
         Ok(())
     }
@@ -230,14 +236,14 @@ where
     ///
     /// * `filter` - The filter to action on.
     /// * `id` - The actual ID filter to apply to `filter`.
-    pub fn set_filter(&mut self, filter: RxFilter, id: Id) -> Result<(), SPIE, CSE> {
+    pub fn set_filter(&mut self, spi: &mut SPI, filter: RxFilter, id: Id) -> Result<(), SPIE, CSE> {
         let regs = filter.registers();
         let data = RxFilterReg::from_id(id).into_bytes();
         debug_assert!(
             regs.len() == data.len(),
             "More registers than data retrieved from filter"
         );
-        self.write_register_addr(&regs, &data)?;
+        self.write_register_addr(spi, &regs, &data)?;
         Ok(())
     }
 
@@ -247,14 +253,14 @@ where
     ///
     /// * `mask` - The mask to action on.
     /// * `id` - The actual ID mask to apply to `mask`.
-    pub fn set_mask(&mut self, mask: RxMask, id: Id) -> Result<(), SPIE, CSE> {
+    pub fn set_mask(&mut self, spi: &mut SPI, mask: RxMask, id: Id) -> Result<(), SPIE, CSE> {
         let regs = mask.registers();
         let data = RxMaskReg::from_id(id).into_bytes();
         debug_assert!(
             regs.len() == data.len(),
             "More registers than data retrieved from mask"
         );
-        self.write_register_addr(&regs, &data)?;
+        self.write_register_addr(spi, &regs, &data)?;
         Ok(())
     }
 
@@ -267,6 +273,7 @@ where
     /// * `clkout_en` - Whether to enable the `CLKOUT` pin.
     pub fn set_bitrate(
         &mut self,
+        spi: &mut SPI,
         can_speed: CanSpeed,
         mcp_speed: McpSpeed,
         clkout_en: bool,
@@ -306,9 +313,9 @@ where
         if clkout_en {
             cfg3 = cfg3.with_sof(false);
         }
-        self.write_register(Cnf1::from_bytes([cfg1]))?;
-        self.write_register(Cnf2::from_bytes([cfg2]))?;
-        self.write_register(cfg3)?;
+        self.write_register(spi, Cnf1::from_bytes([cfg1]))?;
+        self.write_register(spi, Cnf2::from_bytes([cfg2]))?;
+        self.write_register(spi, cfg3)?;
         Ok(())
     }
 
@@ -324,35 +331,35 @@ where
     ///
     /// Nothing on success, error if waking the device or setting the new mode
     /// fails.
-    pub fn set_mode(&mut self, mode: OpMode) -> Result<(), SPIE, CSE> {
-        let status: CanStat = self.read_register()?;
+    pub fn set_mode(&mut self, spi: &mut SPI, mode: OpMode) -> Result<(), SPIE, CSE> {
+        let status: CanStat = self.read_register(spi)?;
 
         // If the device is currently in sleep mode, we need to wake it
         if status.opmod() == OpMode::Sleep && mode != OpMode::Sleep {
             // Ensure wake interrupt is enabled
-            let caninte: CanInte = self.read_register()?;
+            let caninte: CanInte = self.read_register(spi)?;
             let int_enabled = caninte.wakie();
             if !int_enabled {
                 let data = CanInte::new().with_wakie(true);
-                self.modify_register(data, data)?;
+                self.modify_register(spi, data, data)?;
             }
 
             // Actually wake the device
             let data = CanIntf::new().with_wakif(true);
-            self.modify_register(data, CanIntf::MASK_WAKIF)?;
+            self.modify_register(spi, data, CanIntf::MASK_WAKIF)?;
 
             // Change the device into listen only mode.
-            self.set_mode_no_wake(OpMode::ListenOnly)?;
+            self.set_mode_no_wake(spi, OpMode::ListenOnly)?;
 
             // Disable the interrupt if it was originally disabled
             if !int_enabled {
-                self.modify_register(CanInte::new().with_wakie(false), CanInte::MASK_WAKIE)?;
+                self.modify_register(spi, CanInte::new().with_wakie(false), CanInte::MASK_WAKIE)?;
             }
         }
 
         // Clear wake flag and actually set the new mode
-        self.modify_register(CanIntf::new().with_wakif(false), CanIntf::MASK_WAKIF)?;
-        self.set_mode_no_wake(mode)
+        self.modify_register(spi, CanIntf::new().with_wakif(false), CanIntf::MASK_WAKIF)?;
+        self.set_mode_no_wake(spi, mode)
     }
 
     /// Attempts to set the operation mode without waking the device.
@@ -368,13 +375,13 @@ where
     ///
     /// Nothing on success, an error if the device did not respond to changing
     /// mode.
-    fn set_mode_no_wake(&mut self, mode: OpMode) -> Result<(), SPIE, CSE> {
-        self.modify_register(CanCtrl::new().with_reqop(mode), CanCtrl::MASK_REQOP)?;
+    fn set_mode_no_wake(&mut self, spi: &mut SPI, mode: OpMode) -> Result<(), SPIE, CSE> {
+        self.modify_register(spi, CanCtrl::new().with_reqop(mode), CanCtrl::MASK_REQOP)?;
 
         // Wait until status register updates with new mode. We retry 20 times, if it
         // hasn't updated by then fail.
         for _ in 0..20 {
-            let canstat: CanStat = self.read_register()?;
+            let canstat: CanStat = self.read_register(spi)?;
             if canstat.opmod_or_err() == Ok(mode) {
                 return Ok(());
             }
@@ -388,8 +395,8 @@ where
     /// # Parameters
     ///
     /// * `clken` - Whether the `CLKOUT` pin should be enabled or disabled.
-    fn set_clken(&mut self, clken: bool) -> Result<(), SPIE, CSE> {
-        self.modify_register(CanCtrl::new().with_clken(clken), CanCtrl::MASK_CLKEN)
+    fn set_clken(&mut self, spi: &mut SPI, clken: bool) -> Result<(), SPIE, CSE> {
+        self.modify_register(spi, CanCtrl::new().with_clken(clken), CanCtrl::MASK_CLKEN)
     }
 
     /// Sends a CAN frame over the CAN bus via any available Tx buffer.
@@ -397,9 +404,9 @@ where
     /// # Parameters
     ///
     /// * `frame` - Frame to send.
-    pub fn send_message(&mut self, frame: CanFrame) -> Result<(), SPIE, CSE> {
-        let buf = self.find_free_tx_buf()?;
-        self.send_message_via_buffer(buf, frame)
+    pub fn send_message(&mut self, spi: &mut SPI, frame: CanFrame) -> Result<(), SPIE, CSE> {
+        let buf = self.find_free_tx_buf(spi)?;
+        self.send_message_via_buffer(spi, buf, frame)
     }
 
     /// Sends a CAN frame over the CAN bus via a specific Tx buffer.
@@ -410,25 +417,27 @@ where
     /// * `frame` - Frame to send.
     pub fn send_message_via_buffer(
         &mut self,
+        spi: &mut SPI,
         buf: TxBuf,
         frame: CanFrame,
     ) -> Result<(), SPIE, CSE> {
         // Write control registers.
         let txbuf = TxBufIdent::from_frame(&frame);
-        self.write_register_addr(&buf.registers(), &txbuf.into_bytes())?;
+        self.write_register_addr(spi, &buf.registers(), &txbuf.into_bytes())?;
 
         // Write data registers.
-        self.write_registers(buf.data(), frame.data())?;
+        self.write_registers(spi, buf.data(), frame.data())?;
 
         // Set `txreq` bit in ctrl register.
         self.modify_register_addr(
+            spi,
             &[buf.ctrl()],
             &TxbCtrl::MASK_TXREQ.into_bytes(),
             &TxbCtrl::new().with_txreq(true).into_bytes(),
         )?;
 
         // Check for any errors.
-        let ctrl = self.read_txb_ctrl(&buf)?;
+        let ctrl = self.read_txb_ctrl(spi,&buf)?;
         if ctrl.abtf() || ctrl.mloa() || ctrl.txerr() {
             Err(Error::TxFailed)
         } else {
@@ -437,12 +446,12 @@ where
     }
 
     /// Reads a message from the MCP2515 Rx buffers.
-    pub fn read_message(&mut self) -> Result<CanFrame, SPIE, CSE> {
-        let status = self.read_status()?;
+    pub fn read_message(&mut self, spi: &mut SPI) -> Result<CanFrame, SPIE, CSE> {
+        let status = self.read_status(spi)?;
         if status.rx0if() {
-            self.read_message_from_buf(RxBuf::B0)
+            self.read_message_from_buf(spi, RxBuf::B0)
         } else if status.rx1if() {
-            self.read_message_from_buf(RxBuf::B1)
+            self.read_message_from_buf(spi, RxBuf::B1)
         } else {
             Err(Error::NoMessage)
         }
@@ -453,17 +462,18 @@ where
     /// # Parameters
     ///
     /// * `buf` - Rx buffer to read from.
-    pub fn read_message_from_buf(&mut self, buf: RxBuf) -> Result<CanFrame, SPIE, CSE> {
+    pub fn read_message_from_buf(&mut self, spi: &mut SPI, buf: RxBuf) -> Result<CanFrame, SPIE, CSE> {
         let regs = buf.registers();
         let mut ret = [0u8; 5];
         debug_assert!(regs.len() == ret.len());
 
-        self.read_register_addr(&regs, &mut ret)?;
+        self.read_register_addr(spi, &regs, &mut ret)?;
         let rxbuf = RxBufIdent::from_bytes(ret);
 
         // Read data and claer Rx interrupt flag
-        let frame = rxbuf.into_frame(|ret| self.read_register_seq(buf.data(), ret))?;
+        let frame = rxbuf.into_frame(|ret| self.read_register_seq(spi, buf.data(), ret))?;
         self.modify_register(
+            spi,
             CanIntf::new(),
             match buf {
                 RxBuf::B0 => CanIntf::MASK_RX0IF,
@@ -478,9 +488,9 @@ where
     /// # Returns
     ///
     /// An available Tx buffer on success, error if all Tx buffers were busy.
-    pub fn find_free_tx_buf(&mut self) -> Result<TxBuf, SPIE, CSE> {
+    pub fn find_free_tx_buf(&mut self, spi: &mut SPI) -> Result<TxBuf, SPIE, CSE> {
         for buffer in TxBuf::ALL {
-            let ctrl = self.read_txb_ctrl(&buffer)?;
+            let ctrl = self.read_txb_ctrl(spi, &buffer)?;
             if !ctrl.txreq() {
                 return Ok(buffer);
             }
@@ -489,15 +499,15 @@ where
     }
 
     /// Read the `CTRL` register of a Tx buffer.
-    fn read_txb_ctrl(&mut self, buffer: &TxBuf) -> Result<TxbCtrl, SPIE, CSE> {
+    fn read_txb_ctrl(&mut self, spi: &mut SPI, buffer: &TxBuf) -> Result<TxbCtrl, SPIE, CSE> {
         let mut buf = [0u8; 1];
-        self.read_register_addr(&[buffer.ctrl()], &mut buf)?;
+        self.read_register_addr(spi, &[buffer.ctrl()], &mut buf)?;
         Ok(TxbCtrl::from_bytes(buf))
     }
 
     /// Resets the MCP2515.
-    pub fn reset(&mut self, delay: &mut impl DelayMs<u8>) -> Result<(), SPIE, CSE> {
-        self.transfer(&mut [Instruction::Reset as u8])?;
+    pub fn reset(&mut self, spi: &mut SPI, delay: &mut impl DelayMs<u8>) -> Result<(), SPIE, CSE> {
+        self.transfer(spi, &mut [Instruction::Reset as u8])?;
         // Sleep for 5ms after reset - if the device is in sleep mode it won't respond
         // immediately
         delay.delay_ms(5);
@@ -506,18 +516,18 @@ where
     }
 
     /// Reads the status register.
-    pub fn read_status(&mut self) -> Result<Status, SPIE, CSE> {
+    pub fn read_status(&mut self, spi: &mut SPI) -> Result<Status, SPIE, CSE> {
         let mut data = [Instruction::ReadStatus as u8, 0];
-        self.transfer(&mut data)
+        self.transfer(spi, &mut data)
             .map(|b| [b])
             .map(Status::from_bytes)
     }
 
     /// Read a register via a register object.
     #[inline]
-    pub fn read_register<const N: usize, R: regs::Reg<N>>(&mut self) -> Result<R, SPIE, CSE> {
+    pub fn read_register<const N: usize, R: regs::Reg<N>>(&mut self, spi: &mut SPI) -> Result<R, SPIE, CSE> {
         let mut ret = [0u8; N];
-        self.read_register_addr(&R::ADDRESSES, &mut ret)?;
+        self.read_register_addr(spi, &R::ADDRESSES, &mut ret)?;
         Ok(R::read(ret))
     }
 
@@ -537,13 +547,14 @@ where
     /// The number of registers read on success.
     fn read_register_addr(
         &mut self,
+        spi: &mut SPI,
         regs: &[Register],
         ret: &mut [u8],
     ) -> Result<usize, SPIE, CSE> {
         let n = regs.len().min(ret.len());
         for i in 0..n {
             let mut data = [Instruction::Read as u8, regs[i] as u8, 0];
-            ret[i] = self.transfer(&mut data)?;
+            ret[i] = self.transfer(spi, &mut data)?;
         }
         Ok(n)
     }
@@ -555,9 +566,9 @@ where
     ///
     /// * `reg` - Register to start reading from.
     /// * `ret` - Return slice to write into.
-    fn read_register_seq(&mut self, reg: Register, ret: &mut [u8]) -> Result<(), SPIE, CSE> {
+    fn read_register_seq(&mut self, spi: &mut SPI, reg: Register, ret: &mut [u8]) -> Result<(), SPIE, CSE> {
         let mut hdr = [Instruction::Read as u8, reg as u8];
-        self.with_cs(|spi| -> Result<_, _, _> {
+        self.with_cs(spi, |spi: &mut SPI| -> Result<_, _, _> {
             spi.transfer(&mut hdr).map_err(Error::Spi)?;
             // As the MCP2515 doesn't care what we send it while reading, we can just
             // transfer `ret` as it is. The values will be overriden with received data as
@@ -571,9 +582,10 @@ where
     #[inline]
     pub fn write_register<const N: usize, R: regs::Reg<N>>(
         &mut self,
+        spi: &mut SPI,
         reg: R,
     ) -> Result<(), SPIE, CSE> {
-        self.write_register_addr(&R::ADDRESSES, &reg.write())?;
+        self.write_register_addr(spi, &R::ADDRESSES, &reg.write())?;
         Ok(())
     }
 
@@ -584,22 +596,23 @@ where
     /// written is returned in a result.
     pub fn write_register_addr(
         &mut self,
+        spi: &mut SPI,
         regs: &[Register],
         data: &[u8],
     ) -> Result<usize, SPIE, CSE> {
         let n = regs.len().min(data.len());
         for i in 0..n {
             let mut data = [Instruction::Write as u8, regs[i] as u8, data[i]];
-            self.transfer(&mut data)?;
+            self.transfer(spi, &mut data)?;
         }
         Ok(n)
     }
 
     /// Writes to sequential registers. Writing will start at `reg` and continue
     /// sequentially until `data` is empty.
-    fn write_registers(&mut self, reg: Register, data: &[u8]) -> Result<(), SPIE, CSE> {
+    fn write_registers(&mut self, spi: &mut SPI, reg: Register, data: &[u8]) -> Result<(), SPIE, CSE> {
         let mut hdr = [Instruction::Write as u8, reg as u8];
-        self.with_cs(|spi| -> Result<_, _, _> {
+        self.with_cs(spi, |spi: &mut SPI| -> Result<_, _, _> {
             spi.transfer(&mut hdr).map_err(Error::Spi)?;
             for d in data {
                 let mut data = [*d];
@@ -619,12 +632,13 @@ where
     #[inline]
     pub fn modify_register<const N: usize, R: regs::BitModifiable<N>>(
         &mut self,
+        spi: &mut SPI,
         reg: R,
         mask: R,
     ) -> Result<(), SPIE, CSE> {
         let mask = mask.write();
         let reg = reg.write();
-        self.modify_register_addr(&R::ADDRESSES, &reg, &mask)?;
+        self.modify_register_addr(spi, &R::ADDRESSES, &reg, &mask)?;
         Ok(())
     }
 
@@ -642,6 +656,7 @@ where
     /// Returns the number of registers modified (n), or error on failure.
     pub fn modify_register_addr(
         &mut self,
+        spi: &mut SPI,
         regs: &[Register],
         data: &[u8],
         masks: &[u8],
@@ -655,7 +670,7 @@ where
                 data[i],                   // Data byte
                 0,                         // Recv
             ];
-            self.transfer(&mut data)?;
+            self.transfer(spi, &mut data)?;
         }
         Ok(n)
     }
@@ -672,8 +687,8 @@ where
     ///
     /// Returns the last element received from the slave. If no bytes were sent,
     /// 0 is returned.
-    fn transfer(&mut self, bytes: &mut [u8]) -> Result<u8, SPIE, CSE> {
-        self.with_cs(|spi| spi.transfer(bytes))?
+    fn transfer(&mut self, spi: &mut SPI, bytes: &mut [u8]) -> Result<u8, SPIE, CSE> {
+        self.with_cs(spi, |spi| spi.transfer(bytes))?
             .map_err(Error::Spi)?;
         if let [.., data] = bytes {
             Ok(*data)
@@ -684,31 +699,32 @@ where
 
     /// Calls a function `f` after bringing the chip select pin low, restoring
     /// it to high after the function has finished.
-    fn with_cs<T>(&mut self, f: impl FnOnce(&mut SPI) -> T) -> Result<T, SPIE, CSE> {
+    fn with_cs<T>(&mut self, spi: &mut SPI, f: impl FnOnce(&mut SPI) -> T) -> Result<T, SPIE, CSE> {
         self.cs.set_low().map_err(Error::Hal)?;
-        let result = f(&mut self.spi);
+        let result = f(spi);
         self.cs.set_high().map_err(Error::Hal)?;
         Ok(result)
     }
 }
 
-impl<SPI, CS, SPIE, CSE> Can for MCP2515<SPI, CS>
-where
-    SPI: Transfer<u8, Error = SPIE>,
-    CS: OutputPin<Error = CSE>,
-    SPIE: Debug,
-    CSE: Debug,
-{
-    type Frame = CanFrame;
-    type Error = Error<SPIE, CSE>;
+//TODO: Look into having it so that we can implement can
+// impl<SPI, CS, SPIE, CSE> Can for MCP2515<SPI, CS>
+// where
+//     SPI: Transfer<u8, Error = SPIE>,
+//     CS: OutputPin<Error = CSE>,
+//     SPIE: Debug,
+//     CSE: Debug,
+// {
+//     type Frame = CanFrame;
+//     type Error = Error<SPIE, CSE>;
 
-    #[inline]
-    fn transmit(&mut self, frame: &Self::Frame) -> Result<(), SPIE, CSE> {
-        self.send_message(*frame)
-    }
+//     #[inline]
+//     fn transmit(&mut self, frame: &Self::Frame) -> Result<(), SPIE, CSE> {
+//         self.send_message(*frame)
+//     }
 
-    #[inline]
-    fn receive(&mut self) -> Result<Self::Frame, SPIE, CSE> {
-        self.read_message()
-    }
-}
+//     #[inline]
+//     fn receive(&mut self) -> Result<Self::Frame, SPIE, CSE> {
+//         self.read_message()
+//     }
+// }
