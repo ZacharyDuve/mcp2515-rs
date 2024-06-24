@@ -12,7 +12,7 @@ use core::fmt::Debug;
 
 use buffer::{RxBuf, RxBufIdent, TxBuf};
 use embedded_hal::{
-    blocking::{can::Can, delay::DelayMs, spi::Transfer},
+    blocking::{delay::DelayMs, spi::Transfer},
     can::{ExtendedId, Frame, Id, StandardId},
     digital::v2::OutputPin,
 };
