@@ -1,11 +1,11 @@
 [package]
 name = "mcp2515"
 description = "`#![no_std]` library for interacting with MCP2515 CAN controller chips."
-version = "0.2.2"
-authors = ["David Cole <david.cole1340@gmail.com>"]
+version = "0.3.0"
+authors = ["Forked Version: Zachary Duve, Original Author: David Cole"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/davidcole1340/mcp2515-rs"
+repository = "https://github.com/ZacharyDuve/mcp2515-rs"
 categories = ["no-std", "embedded"]
 keywords = ["can", "mcp2515"]
 
