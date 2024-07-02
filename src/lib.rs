@@ -152,10 +152,10 @@ where
     ///
     /// * `delay` - Delay interface from downstream HAL.
     /// * `settings` - Settings for MCP2515. See [`Settings`].
-    pub fn init<SPI: SpiBus<u8, Error = SPIE>, SPIE: Debug>(
+    pub fn init<SPI: SpiBus<u8, Error = SPIE>, SPIE: Debug, Delay: DelayNs>(
         &mut self,
         spi: &mut SPI,
-        delay: &mut impl DelayNs,
+        delay: &mut Delay,
         settings: Settings,
     ) -> Result<(), SPIE, CSE> {
         self.cs.set_high().map_err(Error::Hal)?;
