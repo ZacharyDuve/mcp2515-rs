@@ -400,7 +400,7 @@ where
     /// # Parameters
     ///
     /// * `frame` - Frame to send.
-    pub fn send_message<SPI: SpiBus<u8, Error = SPIE>, SPIE: Debug>(&mut self, spi: &mut SPI, frame: CanFrame) -> Result<(), SPIE, CSE> {
+    pub fn send_message<SPI: SpiBus<u8, Error = SPIE>, SPIE: Debug, F: Frame>(&mut self, spi: &mut SPI, frame: F) -> Result<(), SPIE, CSE> {
         let buf = self.find_free_tx_buf(spi)?;
         self.send_message_via_buffer(spi, buf, frame)
     }
@@ -411,14 +411,15 @@ where
     ///
     /// * `buf` - Tx buffer to use for transmission.
     /// * `frame` - Frame to send.
-    pub fn send_message_via_buffer<SPI: SpiBus<u8, Error = SPIE>, SPIE: Debug>(
+    pub fn send_message_via_buffer<SPI: SpiBus<u8, Error = SPIE>, SPIE: Debug, F: Frame>(
         &mut self,
         spi: &mut SPI,
         buf: TxBuf,
-        frame: CanFrame,
+        frame: F,
     ) -> Result<(), SPIE, CSE> {
         // Write control registers.
-        let txbuf = TxBufIdent::from_frame(&frame);
+        //let txbuf = TxBufIdent::from_frame(&frame);
+        let txbuf = TxBufIdent::from(&frame);
         self.write_register_addr(spi, &buf.registers(), &txbuf.into_bytes())?;
 
         // Write data registers.

@@ -60,6 +60,26 @@ impl TxBufIdent {
     }
 }
 
+impl <F: Frame> From<&F> for TxBufIdent {
+    fn from(f: &F) -> Self {
+        let mut reg = TxBufIdent::new()
+            .with_dlc(f.dlc() as u8)
+            .with_rtr(f.is_remote_frame());
+        match &f.id() {
+            Id::Standard(id) => {
+                reg.set_exide(false);
+                reg.set_sid(id.as_raw());
+            }
+            Id::Extended(id) => {
+                reg.set_exide(true);
+                reg.set_eid(id.as_raw() & 0x3FFFF); // Lower 18 bits in EID
+                reg.set_sid((id.as_raw() >> 18) as u16); // Upper 11 bits in SID
+            }
+        };
+        reg
+    }
+}
+
 crate::filter_def! {
     /// Transmit buffer.
     TxBuf(5) => {
